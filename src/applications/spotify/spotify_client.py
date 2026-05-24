@@ -4,6 +4,12 @@ import urequests as requests
 import usocket as socket
 import ujson as json
 
+DEBUG = False
+
+def debug_print(*args):
+    if DEBUG:
+        print(*args)
+
 class SpotifyWebApiClient:
     def __init__(self, session):
         self.session = session
@@ -216,9 +222,9 @@ class Session:
                     response.close()
                 retries -= 1
                 if retries:
-                    print("Failed to refresh access token, retrying")
+                    debug_print("Failed to refresh access token, retrying")
                 else:
-                    print("Failed to refresh access token after 3 tries, giving up")
+                    debug_print("Failed to refresh access token after 3 tries, giving up")
                     raise SpotifyWebApiError("Failed to refresh access token")
 
 class SpotifyWebApiError(Exception):

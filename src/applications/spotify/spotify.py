@@ -12,6 +12,12 @@ from applications.spotify.spotify_client import Session, SpotifyWebApiClient
 from base import BaseApp
 import secrets
 
+DEBUG = False
+
+def debug_print(*args):
+    if DEBUG:
+        print(*args)
+
 class State:
     """Tracks the current state of the Spotify app including playback and UI controls."""
     def __init__(self):
@@ -492,7 +498,7 @@ class Spotify(BaseApp):
             with open("device_id.txt", "w") as f:
                 f.write(device_id)
         except OSError as e:
-            print("Failed to save device id:", e)
+            debug_print("Failed to save device id:", e)
 
     def _load_saved_device_name(self):
         try:
@@ -506,7 +512,7 @@ class Spotify(BaseApp):
             with open("device_name.txt", "w") as f:
                 f.write(device_name)
         except OSError as e:
-            print("Failed to save device name:", e)
+            debug_print("Failed to save device name:", e)
 
     def load_runtime_settings(self):
         try:
@@ -525,7 +531,7 @@ class Spotify(BaseApp):
             with open("runtime_settings.json", "w") as f:
                 f.write(json.dumps(settings))
         except OSError as e:
-            print("Failed to save runtime settings:", e)
+            debug_print("Failed to save runtime settings:", e)
 
     def set_ambient_leds(self, value):
         self.state.toggle_leds = value
@@ -550,7 +556,7 @@ class Spotify(BaseApp):
                 self._trim_known_devices()
                 f.write(json.dumps(self.known_devices))
         except OSError as e:
-            print("Failed to save known devices:", e)
+            debug_print("Failed to save known devices:", e)
 
     def _trim_known_devices(self):
         device_id = self.spotify_client.session.device_id
@@ -651,7 +657,7 @@ class Spotify(BaseApp):
             else:
                 self.state.devices = self._merge_devices([])
         except Exception as e:
-            print("Failed to fetch devices:", e)
+            debug_print("Failed to fetch devices:", e)
             self.state.devices = self._merge_devices([])
         self.state.devices_loading = False
         self._sync_device_name()
@@ -683,7 +689,7 @@ class Spotify(BaseApp):
         try:
             self.spotify_client.transfer_playback(device_id, play=False)
         except Exception as e:
-            print("Failed to transfer playback:", e)
+            debug_print("Failed to transfer playback:", e)
         self.spotify_client.session.device_id = device_id
         secrets.SPOTIFY_CREDENTIALS['device_id'] = device_id
         self.state.device_name = device_name or "Device"
@@ -794,13 +800,13 @@ class Spotify(BaseApp):
             for button in self.buttons:
                 button.update(self.state, button)
                 if button.is_pressed(self.state):
-                    print(f"{button.name} pressed")
+                    debug_print(f"{button.name} pressed")
                     try:
                         button.on_press(self)
                         if self.state.show_controls:
                             self.controls_visible_since = time.time()
                     except Exception as e:
-                        print(f"Failed to execute on_press: {e}")
+                        debug_print(f"Failed to execute on_press: {e}")
                     break
             
             # Wait here until the user stops touching the screen
@@ -886,7 +892,7 @@ class Spotify(BaseApp):
     def show_image(self, img, minimized=False):
         """Displays an album cover image on the screen."""
         if not img:
-            print("No image data to display.")
+            debug_print("No image data to display.")
             return
 
         try:
@@ -899,7 +905,7 @@ class Spotify(BaseApp):
             self.j.decode(img_x, img_y, jpegdec.JPEG_SCALE_FULL, dither=True)
 
         except Exception as e:
-            print("Failed to load image:", e)
+            debug_print("Failed to load image:", e)
         
     def write_track(self):
         """Writes the track name and artists on the screen."""
@@ -965,7 +971,7 @@ class Spotify(BaseApp):
                         self.state.track = None
                         self.state.is_playing = False
                 except Exception as e:
-                    print("Failed to fetch playback state:", e)
+                    debug_print("Failed to fetch playback state:", e)
 
             self._manage_waiting_screen()
             self._manage_controls_timeout()
@@ -1008,7 +1014,7 @@ def fetch_state(spotify_client):
         shuffle = resp.get("shuffle_state")
         repeat = resp.get("repeat_state", "off") != "off"
         device_id = resp["device"]["id"]
-        print("Got current playing track: " + current_track.get("name"))
+        debug_print("Got current playing track: " + current_track.get("name"))
         return device_id, current_track, is_playing, shuffle, repeat
 
     return None
@@ -1017,13 +1023,13 @@ def get_album_cover(track):
     """Fetches and resizes the album cover image for the given track."""
     images = (track.get("album") or {}).get("images") or []
     if not images:
-        print("Track has no album images.")
+        debug_print("Track has no album images.")
         return None
 
     image = images[1] if len(images) > 1 else images[0]
     img_url = image.get("url")
     if not img_url:
-        print("Album image has no URL.")
+        debug_print("Album image has no URL.")
         return None
     
     img = None
@@ -1034,9 +1040,9 @@ def get_album_cover(track):
         if response.status_code == 200:
             img = response.content
         else:
-            print("Failed to fetch image:", response.status_code)
+            debug_print("Failed to fetch image:", response.status_code)
     except Exception as e:
-        print("Fetch image error:", e)
+        debug_print("Fetch image error:", e)
     finally:
         if response:
             response.close()

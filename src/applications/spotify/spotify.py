@@ -97,26 +97,34 @@ class ControlButton():
         png.decode(x+x_offset, y+y_offset)
 
 class SettingsPanel:
-    """Modal settings window with ambient LED toggle and backlight slider."""
-    PANEL = (60, 90, 360, 300)
-    SLIDER = (80, 280, 320, 40)
-    LED_TOGGLE = (300, 175, 80, 80)
-    CLOSE = (370, 105, 40, 40)
+    """Modal settings window with playback options and display controls."""
+    PANEL = (60, 70, 360, 340)
+    SLIDER = (80, 350, 320, 40)
+    LED_TOGGLE = (300, 125, 60, 60)
+    SHUFFLE_TOGGLE = (300, 185, 60, 60)
+    REPEAT_TOGGLE = (300, 245, 60, 60)
+    CLOSE = (370, 85, 40, 40)
 
     def __init__(self, app):
         self.app = app
         self.display = app.display
         self.colors = app.colors
 
-        self.led_icons = {}
-        for icon in ("light_on.png", "light_off.png"):
-            png = pngdec.PNG(self.display)
-            png.open_file("applications/spotify/icons/" + icon)
-            self.led_icons[icon] = png
+        self.led_icons = self._load_icons(("light_on.png", "light_off.png"))
+        self.shuffle_icons = self._load_icons(("shuffle_on.png", "shuffle_off.png"))
+        self.repeat_icons = self._load_icons(("repeat_on.png", "repeat_off.png"))
 
         self.close_icon = pngdec.PNG(self.display)
         self.close_icon.open_file("applications/spotify/icons/exit.png")
         self._slider_dragging = False
+
+    def _load_icons(self, names):
+        icons = {}
+        for name in names:
+            png = pngdec.PNG(self.display)
+            png.open_file("applications/spotify/icons/" + name)
+            icons[name] = png
+        return icons
 
     def draw(self, state):
         px, py, pw, ph = self.PANEL
@@ -129,19 +137,35 @@ class SettingsPanel:
         self.display.set_thickness(2)
         self.display.text("Settings", px + 20, py + 20, scale=1.2)
 
-        self.display.text("Ambient LEDs", px + 20, py + 100, scale=0.9)
-        self.display.text("Backlight", px + 20, py + 200, scale=0.9)
+        self.display.text("Ambient LEDs", px + 20, py + 80, scale=0.9)
+        self._draw_toggle_icon(
+            self.led_icons["light_on.png" if state.toggle_leds else "light_off.png"],
+            self.LED_TOGGLE,
+        )
 
-        led_icon = self.led_icons["light_on.png" if state.toggle_leds else "light_off.png"]
-        lx, ly, lw, lh = self.LED_TOGGLE
-        icon_w, icon_h = led_icon.get_width(), led_icon.get_height()
-        led_icon.decode(lx + (lw - icon_w) // 2, ly + (lh - icon_h) // 2)
+        self.display.text("Shuffle", px + 20, py + 140, scale=0.9)
+        self._draw_toggle_icon(
+            self.shuffle_icons["shuffle_on.png" if state.shuffle else "shuffle_off.png"],
+            self.SHUFFLE_TOGGLE,
+        )
 
+        self.display.text("Repeat", px + 20, py + 200, scale=0.9)
+        self._draw_toggle_icon(
+            self.repeat_icons["repeat_on.png" if state.repeat else "repeat_off.png"],
+            self.REPEAT_TOGGLE,
+        )
+
+        self.display.text("Backlight", px + 20, py + 240, scale=0.9)
         self._draw_slider(state.backlight)
 
         cx, cy, cw, ch = self.CLOSE
         close_w, close_h = self.close_icon.get_width(), self.close_icon.get_height()
         self.close_icon.decode(cx + (cw - close_w) // 2, cy + (ch - close_h) // 2)
+
+    def _draw_toggle_icon(self, icon, bounds):
+        lx, ly, lw, lh = bounds
+        icon_w, icon_h = icon.get_width(), icon.get_height()
+        icon.decode(lx + (lw - icon_w) // 2, ly + (lh - icon_h) // 2)
 
     def _draw_slider(self, value):
         sx, sy, sw, sh = self.SLIDER
@@ -166,6 +190,16 @@ class SettingsPanel:
         if self._in_bounds(touch.x, touch.y, self.LED_TOGGLE):
             state.toggle_leds = not state.toggle_leds
             self.app.toggle_leds(state.toggle_leds)
+            return True
+
+        if self._in_bounds(touch.x, touch.y, self.SHUFFLE_TOGGLE):
+            state.shuffle = not state.shuffle
+            self.app.spotify_client.toggle_shuffle(state.shuffle)
+            return True
+
+        if self._in_bounds(touch.x, touch.y, self.REPEAT_TOGGLE):
+            state.repeat = not state.repeat
+            self.app.spotify_client.toggle_repeat(state.repeat)
             return True
 
         if self._in_bounds(touch.x, touch.y, self.SLIDER):
@@ -272,14 +306,6 @@ class Spotify(BaseApp):
             button.enabled = state.show_controls and not state.show_settings
             button.icon = "pause.png" if state.is_playing else "play.png"
 
-        def update_shuffle(state, button):
-            button.enabled = state.show_controls and not state.show_settings
-            button.icon = "shuffle_on.png" if state.shuffle else "shuffle_off.png"
-
-        def update_repeat(state, button):
-            button.enabled = state.show_controls and not state.show_settings
-            button.icon = "repeat_on.png" if state.repeat else "repeat_off.png"
-
         def update_settings(state, button):
             button.enabled = state.show_controls and not state.show_settings
             button.icon = "settings.png"
@@ -306,14 +332,6 @@ class Spotify(BaseApp):
             self.spotify_client.previous()
             self.state.latest_fetch = None
 
-        def toggle_shuffle(self):
-            self.spotify_client.toggle_shuffle(not self.state.shuffle)
-            self.state.shuffle = not self.state.shuffle
-
-        def toggle_repeat(self):
-            self.spotify_client.toggle_repeat(not self.state.repeat)
-            self.state.repeat = not self.state.repeat
-
         def open_settings(self):
             self.state.show_settings = True
             self.draw_overlay()
@@ -321,11 +339,9 @@ class Spotify(BaseApp):
         # --- Button configurations ---
         buttons_config = [
             ("Exit", ["exit.png"], (0, 0, 80, 80), exit_app, update_show_controls),
-            ("Next", ["next.png"], (self.center_x + 60, self.height - 100, 80, 100), next_track, update_show_controls),
-            ("Previous", ["previous.png"], (self.center_x - 140, self.height - 100, 80, 100), previous_track, update_show_controls),
-            ("Play", ["play.png", "pause.png"], (self.center_x - 50, self.height - 100, 80, 100), play_pause, update_play_pause),
-            ("Toggle Shuffle", ["shuffle_on.png", "shuffle_off.png"], (self.center_x - 230, self.height - 100, 80, 100), toggle_shuffle, update_shuffle),
-            ("Toggle Repeat", ["repeat_on.png", "repeat_off.png"], (self.center_x + 150, self.height - 100, 80, 100), toggle_repeat, update_repeat),
+            ("Next", ["next.png"], (self.center_x + 120, self.height - 100, 80, 100), next_track, update_show_controls),
+            ("Previous", ["previous.png"], (self.center_x - 200, self.height - 100, 80, 100), previous_track, update_show_controls),
+            ("Play", ["play.png", "pause.png"], (self.center_x - 40, self.height - 100, 80, 100), play_pause, update_play_pause),
             ("Settings", ["settings.png"], (self.width - 100, 0, 100, 80), open_settings, update_settings),
             ("Toggle Controls", None, (0, 0, self.width, self.height), toggle_controls, update_always_enabled),
         ]
@@ -347,6 +363,13 @@ class Spotify(BaseApp):
         """Handles touch input events and button presses."""
         while not self.state.exit:
             self.touch.poll()
+
+            if self.state.screen_asleep and self.touch.state:
+                self._wake_screen()
+                while self.touch.state:
+                    self.touch.poll()
+                await asyncio.sleep_ms(1)
+                continue
 
             if self.state.show_settings:
                 if self.settings.handle_touch(self.touch, self.state):
@@ -389,6 +412,15 @@ class Spotify(BaseApp):
         self.display.set_thickness(2)
         self.display.set_pen(self.colors.WHITE)
         self.display.text("waiting...", icon_x - 10, icon_y + icon_h + 36, scale=0.9)
+
+    def _wake_screen(self):
+        """Turns the screen back on after sleep and redraws the current view."""
+        self.state.screen_asleep = False
+        self.turn_screen_on(self.state.backlight)
+        if self.state.waiting:
+            self.waiting_since = time.time()
+            self.show_waiting()
+        self.draw_overlay()
 
     def _manage_waiting_screen(self):
         """Turn the screen off after prolonged waiting; restore it when playback returns."""

@@ -61,6 +61,18 @@ class SpotifyWebApiClient:
             url='https://api.spotify.com/v1/me/player/recently-played?limit=1',
         )
 
+    def devices(self):
+        return self.session.get(
+            url='https://api.spotify.com/v1/me/player/devices',
+        )
+
+    def transfer_playback(self, device_id, play=False):
+        self.session.put(
+            url='https://api.spotify.com/v1/me/player',
+            json={'device_ids': [device_id], 'play': play},
+            skip_device_id=True,
+        )
+
 class Device:
     def __init__(
         self,
@@ -101,14 +113,15 @@ class Session:
 
         return self._execute_request(get_request)
 
-    def put(self, url, json=None, **kwargs):
+    def put(self, url, json=None, skip_device_id=False, **kwargs):
         # Workaround for urequests not sending "Content-Length" on empty data
         if json is None:
             json = {}
 
         def put_request():
+            target_url = url if skip_device_id else self._add_device_id(url)
             return requests.put(
-                url=self._add_device_id(url),
+                url=target_url,
                 headers=self._headers(),
                 json=json,
                 **kwargs,

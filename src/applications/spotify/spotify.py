@@ -4,6 +4,7 @@ import jpegdec
 import pngdec
 import uasyncio as asyncio
 import urequests as requests
+import ujson as json
 
 from touch import Button
 
@@ -24,6 +25,10 @@ class State:
         self.screen_asleep = False
         self.show_controls = False
         self.show_settings = False
+        self.show_device_picker = False
+        self.devices_loading = False
+        self.device_name = "Device"
+        self.devices = []
         self.exit = False
 
         self.latest_fetch = None
@@ -37,6 +42,8 @@ class State:
         state.shuffle = self.shuffle
         state.show_controls = self.show_controls
         state.show_settings = self.show_settings
+        state.show_device_picker = self.show_device_picker
+        state.device_name = self.device_name
         state.waiting = self.waiting
         state.screen_asleep = self.screen_asleep
         state.exit = self.exit
@@ -54,6 +61,8 @@ class State:
             self.shuffle == other.shuffle and
             self.show_controls == other.show_controls and
             self.show_settings == other.show_settings and
+            self.show_device_picker == other.show_device_picker and
+            self.device_name == other.device_name and
             self.waiting == other.waiting and
             self.screen_asleep == other.screen_asleep and
             self.exit == other.exit and
@@ -98,12 +107,15 @@ class ControlButton():
 
 class SettingsPanel:
     """Modal settings window with playback options and display controls."""
-    PANEL = (60, 70, 360, 340)
-    SLIDER = (80, 350, 320, 40)
-    LED_TOGGLE = (300, 125, 60, 60)
-    SHUFFLE_TOGGLE = (300, 185, 60, 60)
-    REPEAT_TOGGLE = (300, 245, 60, 60)
-    CLOSE = (370, 85, 40, 40)
+    PANEL = (60, 60, 360, 370)
+    SLIDER = (80, 370, 320, 40)
+    DEVICE_BUTTON = (80, 95, 260, 36)
+    DEVICE_PICKER = (50, 90, 380, 300)
+    PICKER_ROW_HEIGHT = 44
+    LED_TOGGLE = (300, 160, 60, 60)
+    SHUFFLE_TOGGLE = (300, 220, 60, 60)
+    REPEAT_TOGGLE = (300, 280, 60, 60)
+    CLOSE = (370, 75, 40, 40)
 
     def __init__(self, app):
         self.app = app
@@ -137,30 +149,98 @@ class SettingsPanel:
         self.display.set_thickness(2)
         self.display.text("Settings", px + 20, py + 20, scale=1.2)
 
-        self.display.text("Ambient LEDs", px + 20, py + 80, scale=0.9)
+        self.display.text("Device", px + 20, py + 55, scale=0.9)
+        self._draw_device_button(state)
+
+        self.display.text("Ambient LEDs", px + 20, py + 115, scale=0.9)
         self._draw_toggle_icon(
             self.led_icons["light_on.png" if state.toggle_leds else "light_off.png"],
             self.LED_TOGGLE,
         )
 
-        self.display.text("Shuffle", px + 20, py + 140, scale=0.9)
+        self.display.text("Shuffle", px + 20, py + 175, scale=0.9)
         self._draw_toggle_icon(
             self.shuffle_icons["shuffle_on.png" if state.shuffle else "shuffle_off.png"],
             self.SHUFFLE_TOGGLE,
         )
 
-        self.display.text("Repeat", px + 20, py + 200, scale=0.9)
+        self.display.text("Repeat", px + 20, py + 235, scale=0.9)
         self._draw_toggle_icon(
             self.repeat_icons["repeat_on.png" if state.repeat else "repeat_off.png"],
             self.REPEAT_TOGGLE,
         )
 
-        self.display.text("Backlight", px + 20, py + 240, scale=0.9)
+        self.display.text("Backlight", px + 20, py + 295, scale=0.9)
         self._draw_slider(state.backlight)
 
         cx, cy, cw, ch = self.CLOSE
         close_w, close_h = self.close_icon.get_width(), self.close_icon.get_height()
         self.close_icon.decode(cx + (cw - close_w) // 2, cy + (ch - close_h) // 2)
+
+        if state.show_device_picker:
+            self._draw_device_picker(state)
+
+    def _truncate(self, text, max_len=24):
+        text = ''.join(i if ord(i) < 128 else ' ' for i in (text or ""))
+        if len(text) > max_len:
+            return text[:max_len] + "..."
+        return text
+
+    def _draw_device_button(self, state):
+        bx, by, bw, bh = self.DEVICE_BUTTON
+        self.display.set_pen(self.colors._BLACK)
+        self.display.rectangle(bx, by, bw, bh)
+        self.display.set_pen(self.colors.WHITE)
+        self.display.rectangle(bx + 2, by + 2, bw - 4, bh - 4)
+        self.display.set_pen(self.colors._BLACK)
+        label = self._truncate(state.device_name, 20)
+        self.display.text(label, bx + 10, by + 10, scale=0.8)
+
+    def _draw_device_picker(self, state):
+        px, py, pw, ph = self.DEVICE_PICKER
+        self.display.set_pen(self.colors._BLACK)
+        self.display.rectangle(0, 0, self.app.width, self.app.height)
+        self.display.set_pen(self.colors.GRAY)
+        self.display.rectangle(px, py, pw, ph)
+        self.display.set_pen(self.colors.WHITE)
+        self.display.text("Select Device", px + 20, py + 15, scale=1.0)
+
+        if state.devices_loading:
+            self.display.text("Loading...", px + 20, py + 60, scale=0.9)
+            return
+
+        if not state.devices:
+            self.display.text("No devices found", px + 20, py + 60, scale=0.9)
+            self.display.text("Open Spotify on a device", px + 20, py + 85, scale=0.7)
+            return
+
+        current_id = self.app.spotify_client.session.device_id
+        max_rows = min(len(state.devices), 5)
+        for i in range(max_rows):
+            device = state.devices[i]
+            row = self._picker_row_bounds(i)
+            rx, ry, rw, rh = row
+            if device.get("id") == current_id:
+                self.display.set_pen(self.colors.GREEN)
+                self.display.rectangle(rx, ry, rw, rh)
+                self.display.set_pen(self.colors.WHITE)
+            else:
+                self.display.set_pen(self.colors._BLACK)
+                self.display.rectangle(rx, ry, rw, rh)
+                self.display.set_pen(self.colors.WHITE)
+
+            name = device.get("name", "Unknown")
+            if not device.get("available", True):
+                name = name + " [Offline]"
+            name = self._truncate(name, 22)
+            device_type = self._truncate(device.get("type", ""), 12)
+            self.display.text(name, rx + 8, ry + 6, scale=0.8)
+            self.display.text(device_type, rx + 8, ry + 24, scale=0.6)
+
+    def _picker_row_bounds(self, index):
+        px, py, pw, _ = self.DEVICE_PICKER
+        row_y = py + 50 + index * self.PICKER_ROW_HEIGHT
+        return (px + 10, row_y, pw - 20, self.PICKER_ROW_HEIGHT - 4)
 
     def _draw_toggle_icon(self, icon, bounds):
         lx, ly, lw, lh = bounds
@@ -183,13 +263,20 @@ class SettingsPanel:
         if not touch.state:
             return False
 
+        if state.show_device_picker:
+            return self._handle_device_picker_touch(touch, state)
+
         if self._in_bounds(touch.x, touch.y, self.CLOSE):
             state.show_settings = False
             return True
 
+        if self._in_bounds(touch.x, touch.y, self.DEVICE_BUTTON):
+            state.show_device_picker = True
+            self.app.refresh_devices()
+            return True
+
         if self._in_bounds(touch.x, touch.y, self.LED_TOGGLE):
-            state.toggle_leds = not state.toggle_leds
-            self.app.toggle_leds(state.toggle_leds)
+            self.app.set_ambient_leds(not state.toggle_leds)
             return True
 
         if self._in_bounds(touch.x, touch.y, self.SHUFFLE_TOGGLE):
@@ -210,21 +297,41 @@ class SettingsPanel:
         return False
 
     def handle_drag(self, touch, state):
+        if state.show_device_picker:
+            return False
         if self._slider_dragging and touch.state:
             self._set_backlight_from_x(touch.x, state)
             return True
         return False
 
     def handle_release(self):
+        if self._slider_dragging:
+            self.app.save_runtime_settings()
         self._slider_dragging = False
+
+    def _handle_device_picker_touch(self, touch, state):
+        px, py, pw, ph = self.DEVICE_PICKER
+        if not self._in_bounds(touch.x, touch.y, self.DEVICE_PICKER):
+            state.show_device_picker = False
+            return True
+
+        if state.devices_loading or not state.devices:
+            return True
+
+        for i, device in enumerate(state.devices[:5]):
+            if self._in_bounds(touch.x, touch.y, self._picker_row_bounds(i)):
+                self.app.select_device(device.get("id"), device.get("name", "Device"))
+                state.show_device_picker = False
+                return True
+
+        return True
 
     def _set_backlight_from_x(self, x, state):
         sx, _, sw, _ = self.SLIDER
         value = max(0.0, min(1.0, (x - sx) / sw))
         value = 0.1 + 0.9 * value
         if abs(value - state.backlight) > 0.01:
-            state.backlight = value
-            self.app.set_backlight(value)
+            self.app.set_backlight_setting(value)
 
     @staticmethod
     def _in_bounds(x, y, bounds):
@@ -268,8 +375,25 @@ class Spotify(BaseApp):
         self.waiting_icon.open_file("applications/spotify/icon_small.png")
 
         self.state = State()
+        runtime_settings = self.load_runtime_settings()
+        if "toggle_leds" in runtime_settings:
+            self.state.toggle_leds = runtime_settings["toggle_leds"]
+        if "backlight" in runtime_settings:
+            self.state.backlight = max(0.1, min(1.0, runtime_settings["backlight"]))
+        saved_device_id = self._load_saved_device_id()
+        saved_device_name = self._load_saved_device_name()
+        self.has_saved_device = bool(saved_device_id and saved_device_name)
+        self.state.device_name = saved_device_name or self.state.device_name
+        self.known_devices = self._load_known_devices()
+        if self.has_saved_device:
+            self._remember_device({
+                "id": saved_device_id,
+                "name": saved_device_name,
+                "type": "",
+            })
         self.waiting_since = None
         self.set_backlight(self.state.backlight)
+        self.toggle_leds(self.state.toggle_leds)
         self.settings = SettingsPanel(self)
         self.setup_buttons()
     
@@ -291,7 +415,169 @@ class Spotify(BaseApp):
                 time.sleep(2)
 
         session = Session(secrets.SPOTIFY_CREDENTIALS)
-        return SpotifyWebApiClient(session)
+        client = SpotifyWebApiClient(session)
+        saved_device_id = self._load_saved_device_id()
+        if saved_device_id:
+            client.session.device_id = saved_device_id
+            secrets.SPOTIFY_CREDENTIALS['device_id'] = saved_device_id
+        return client
+
+    def _load_saved_device_id(self):
+        try:
+            with open("device_id.txt", "r") as f:
+                return f.read().strip()
+        except OSError:
+            return None
+
+    def _save_device_id(self, device_id):
+        try:
+            with open("device_id.txt", "w") as f:
+                f.write(device_id)
+        except OSError as e:
+            print("Failed to save device id:", e)
+
+    def _load_saved_device_name(self):
+        try:
+            with open("device_name.txt", "r") as f:
+                return f.read().strip()
+        except OSError:
+            return None
+
+    def _save_device_name(self, device_name):
+        try:
+            with open("device_name.txt", "w") as f:
+                f.write(device_name)
+        except OSError as e:
+            print("Failed to save device name:", e)
+
+    def load_runtime_settings(self):
+        try:
+            with open("runtime_settings.json", "r") as f:
+                settings = json.loads(f.read())
+                return settings if isinstance(settings, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save_runtime_settings(self):
+        settings = {
+            "toggle_leds": self.state.toggle_leds,
+            "backlight": round(self.state.backlight, 2),
+        }
+        try:
+            with open("runtime_settings.json", "w") as f:
+                f.write(json.dumps(settings))
+        except OSError as e:
+            print("Failed to save runtime settings:", e)
+
+    def set_ambient_leds(self, value):
+        self.state.toggle_leds = value
+        self.toggle_leds(value)
+        self.save_runtime_settings()
+
+    def set_backlight_setting(self, value):
+        self.state.backlight = max(0.1, min(1.0, value))
+        self.set_backlight(self.state.backlight)
+
+    def _load_known_devices(self):
+        try:
+            with open("known_devices.json", "r") as f:
+                devices = json.loads(f.read())
+                return devices if isinstance(devices, list) else []
+        except (OSError, ValueError):
+            return []
+
+    def _save_known_devices(self):
+        try:
+            with open("known_devices.json", "w") as f:
+                f.write(json.dumps(self.known_devices))
+        except OSError as e:
+            print("Failed to save known devices:", e)
+
+    def _remember_device(self, device):
+        device_id = device.get("id")
+        if not device_id:
+            return
+
+        saved = {
+            "id": device_id,
+            "name": device.get("name", "Device"),
+            "type": device.get("type", ""),
+        }
+        for i, known in enumerate(self.known_devices):
+            if known.get("id") == device_id:
+                self.known_devices[i] = saved
+                return
+        self.known_devices.append(saved)
+
+    def _merge_devices(self, live_devices):
+        live_ids = {}
+        merged = []
+
+        for device in live_devices:
+            device_id = device.get("id")
+            if not device_id:
+                continue
+            live_ids[device_id] = True
+            self._remember_device(device)
+            merged.append({
+                "id": device_id,
+                "name": device.get("name", "Device"),
+                "type": device.get("type", ""),
+                "available": True,
+            })
+
+        for device in self.known_devices:
+            device_id = device.get("id")
+            if device_id and device_id not in live_ids:
+                merged.append({
+                    "id": device_id,
+                    "name": device.get("name", "Device"),
+                    "type": device.get("type", ""),
+                    "available": False,
+                })
+
+        self._save_known_devices()
+        return merged
+
+    def refresh_devices(self):
+        self.state.devices_loading = True
+        self.state.devices = []
+        try:
+            resp = self.spotify_client.devices()
+            if resp:
+                self.state.devices = self._merge_devices(resp.get("devices", []))
+            else:
+                self.state.devices = self._merge_devices([])
+        except Exception as e:
+            print("Failed to fetch devices:", e)
+            self.state.devices = self._merge_devices([])
+        self.state.devices_loading = False
+        self._sync_device_name()
+
+    def _sync_device_name(self):
+        device_id = self.spotify_client.session.device_id
+        for device in self.state.devices:
+            if device.get("id") == device_id:
+                self.state.device_name = device.get("name", "Device")
+                self._save_device_name(self.state.device_name)
+                return
+        if device_id and not self.state.device_name:
+            self.state.device_name = "Device"
+
+    def select_device(self, device_id, device_name):
+        if not device_id:
+            return
+        try:
+            self.spotify_client.transfer_playback(device_id, play=False)
+        except Exception as e:
+            print("Failed to transfer playback:", e)
+        self.spotify_client.session.device_id = device_id
+        secrets.SPOTIFY_CREDENTIALS['device_id'] = device_id
+        self.state.device_name = device_name or "Device"
+        self.has_saved_device = True
+        self._save_device_id(device_id)
+        self._save_device_name(self.state.device_name)
+        self.state.latest_fetch = None
         
     def setup_buttons(self):
         """Initializes control buttons and their behavior."""
@@ -398,6 +684,14 @@ class Spotify(BaseApp):
 
             await asyncio.sleep_ms(1)
 
+    def display_centered_text(self, text, y, scale=1):
+        """Draws text centered horizontally on the display."""
+        try:
+            text_width = self.display.measure_text(text, scale)
+        except Exception:
+            text_width = len(text) * 12 * scale
+        self.display.text(text, int((self.width - text_width) // 2), y, scale=scale)
+
     def show_waiting(self):
         """Displays a black screen with the Spotify icon and waiting message."""
         self.display.set_layer(0)
@@ -411,7 +705,16 @@ class Spotify(BaseApp):
         self.display.set_font("sans")
         self.display.set_thickness(2)
         self.display.set_pen(self.colors.WHITE)
-        self.display.text("waiting...", icon_x - 10, icon_y + icon_h + 36, scale=0.9)
+        if not self.has_saved_device:
+            self.display_centered_text("Select a device", icon_y + icon_h + 34, scale=0.8)
+            self.display_centered_text("to control...", icon_y + icon_h + 60, scale=0.8)
+            return
+
+        device_name = ''.join(i if ord(i) < 128 else ' ' for i in self.state.device_name)
+        if len(device_name) > 22:
+            device_name = device_name[:22] + "..."
+        self.display_centered_text("waiting for", icon_y + icon_h + 34, scale=0.85)
+        self.display_centered_text(device_name, icon_y + icon_h + 62, scale=0.75)
 
     def _wake_screen(self):
         """Turns the screen back on after sleep and redraws the current view."""

@@ -742,6 +742,10 @@ class Spotify(BaseApp):
 
     def show_image(self, img, minimized=False):
         """Displays an album cover image on the screen."""
+        if not img:
+            print("No image data to display.")
+            return
+
         try:
             self.j.open_RAM(memoryview(img))
 
@@ -751,8 +755,8 @@ class Spotify(BaseApp):
             self.clear(0)
             self.j.decode(img_x, img_y, jpegdec.JPEG_SCALE_FULL, dither=True)
 
-        except OSError:
-            print("Failed to load image.")
+        except Exception as e:
+            print("Failed to load image:", e)
         
     def write_track(self):
         """Writes the track name and artists on the screen."""
@@ -867,11 +871,20 @@ def fetch_state(spotify_client):
 
 def get_album_cover(track):
     """Fetches and resizes the album cover image for the given track."""
+    images = (track.get("album") or {}).get("images") or []
+    if not images:
+        print("Track has no album images.")
+        return None
 
-    img_url = track["album"]["images"][1]["url"]
+    image = images[1] if len(images) > 1 else images[0]
+    img_url = image.get("url")
+    if not img_url:
+        print("Album image has no URL.")
+        return None
     
     img = None
     resize_url = f"https://wsrv.nl/?url={img_url}&w=480&h=480"
+    response = None
     try:
         response = requests.get(resize_url)
         if response.status_code == 200:
@@ -880,6 +893,9 @@ def get_album_cover(track):
             print("Failed to fetch image:", response.status_code)
     except Exception as e:
         print("Fetch image error:", e)
+    finally:
+        if response:
+            response.close()
         
     return img
 

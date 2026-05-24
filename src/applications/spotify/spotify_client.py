@@ -197,6 +197,7 @@ class Session:
         )
         retries = 3
         while retries:
+            response = None
             try:
                 response = requests.post(
                     token_endpoint,
@@ -204,19 +205,21 @@ class Session:
                     data=urlencode(params),
                 )
                 self._check_status_code(response)
-                retries -= 1
-            except Exception as E:
+                tokens = response.json()
+                response.close()
+                self.credentials['access_token'] = tokens['access_token']
+                if 'refresh_token' in tokens:
+                    self.credentials['refresh_token'] = tokens['refresh_token']
+                return
+            except Exception as e:
+                if response:
+                    response.close()
                 retries -= 1
                 if retries:
                     print("Failed to refresh access token, retrying")
                 else:
                     print("Failed to refresh access token after 3 tries, giving up")
-
-        tokens = response.json()
-        response.close()
-        self.credentials['access_token'] = tokens['access_token']
-        if 'refresh_token' in tokens:
-            self.credentials['refresh_token'] = tokens['refresh_token']
+                    raise SpotifyWebApiError("Failed to refresh access token")
 
 class SpotifyWebApiError(Exception):
     def __init__(self, message, status=None, reason=None):

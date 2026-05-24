@@ -20,6 +20,8 @@ class State:
         self.repeat = False
         self.shuffle = False
         self.track = None
+        self.waiting = False
+        self.screen_asleep = False
         self.show_controls = False
         self.show_settings = False
         self.exit = False
@@ -35,6 +37,8 @@ class State:
         state.shuffle = self.shuffle
         state.show_controls = self.show_controls
         state.show_settings = self.show_settings
+        state.waiting = self.waiting
+        state.screen_asleep = self.screen_asleep
         state.exit = self.exit
         state.track = {'id': self.track['id']} if self.track else None # only care about track id
         return state
@@ -50,6 +54,8 @@ class State:
             self.shuffle == other.shuffle and
             self.show_controls == other.show_controls and
             self.show_settings == other.show_settings and
+            self.waiting == other.waiting and
+            self.screen_asleep == other.screen_asleep and
             self.exit == other.exit and
             (self.track or {}).get('id') == (other.track or {}).get('id')
         )
@@ -193,6 +199,8 @@ class SettingsPanel:
 
 class Spotify(BaseApp):
     """Main Spotify app managing playback controls, track display, and UI interactions."""
+    WAITING_SLEEP_SECONDS = 300
+
     def __init__(self):
         super().__init__(ambient_light=True, full_res=True, layers=2)
 
@@ -222,7 +230,11 @@ class Spotify(BaseApp):
         # JPEG decoder
         self.j = jpegdec.JPEG(self.display)
 
+        self.waiting_icon = pngdec.PNG(self.display)
+        self.waiting_icon.open_file("applications/spotify/icon_small.png")
+
         self.state = State()
+        self.waiting_since = None
         self.set_backlight(self.state.backlight)
         self.settings = SettingsPanel(self)
         self.setup_buttons()
@@ -363,6 +375,36 @@ class Spotify(BaseApp):
 
             await asyncio.sleep_ms(1)
 
+    def show_waiting(self):
+        """Displays a black screen with the Spotify icon and waiting message."""
+        self.display.set_layer(0)
+        self.clear(0)
+
+        icon_w, icon_h = self.waiting_icon.get_width(), self.waiting_icon.get_height()
+        icon_x = self.center_x - icon_w // 2
+        icon_y = self.center_y - icon_h // 2 - 20
+        self.waiting_icon.decode(icon_x, icon_y)
+
+        self.display.set_font("sans")
+        self.display.set_thickness(2)
+        self.display.set_pen(self.colors.WHITE)
+        self.display.text("waiting...", icon_x - 10, icon_y + icon_h + 36, scale=0.9)
+
+    def _manage_waiting_screen(self):
+        """Turn the screen off after prolonged waiting; restore it when playback returns."""
+        if self.state.waiting:
+            if self.waiting_since is None:
+                self.waiting_since = time.time()
+            elif (not self.state.screen_asleep
+                  and time.time() - self.waiting_since >= self.WAITING_SLEEP_SECONDS):
+                self.state.screen_asleep = True
+                self.turn_screen_off()
+        else:
+            if self.state.screen_asleep:
+                self.turn_screen_on(self.state.backlight)
+                self.state.screen_asleep = False
+            self.waiting_since = None
+
     def show_image(self, img, minimized=False):
         """Displays an album cover image on the screen."""
         try:
@@ -427,20 +469,37 @@ class Spotify(BaseApp):
         prev_state = None
 
         while not self.state.exit:
-            update_display = False
             if not self.state.latest_fetch or time.time() - self.state.latest_fetch > INTERVAL:
                 self.state.latest_fetch = time.time()
-                result = fetch_state(self.spotify_client)
-                if result:
-                    device_id, self.state.track, self.state.is_playing, self.state.shuffle, self.state.repeat = result
-                    if device_id:
-                        self.spotify_client.session.device_id = device_id
+                try:
+                    result = fetch_state(self.spotify_client)
+                    if result:
+                        device_id, self.state.track, self.state.is_playing, self.state.shuffle, self.state.repeat = result
+                        self.state.waiting = False
+                        if device_id:
+                            self.spotify_client.session.device_id = device_id
+                    else:
+                        self.state.waiting = True
+                        self.state.track = None
+                        self.state.is_playing = False
+                except Exception as e:
+                    print("Failed to fetch playback state:", e)
+
+            self._manage_waiting_screen()
 
             await asyncio.sleep(0)
 
-            if not prev_state or (prev_state.track or {}).get('id') != (self.state.track or {}).get("id"):
-                img = get_album_cover(self.state.track)
-                self.show_image(img)
+            layer0_changed = (
+                not prev_state
+                or prev_state.waiting != self.state.waiting
+                or (prev_state.track or {}).get('id') != (self.state.track or {}).get("id")
+            )
+            if layer0_changed:
+                if self.state.waiting:
+                    self.show_waiting()
+                elif self.state.track:
+                    img = get_album_cover(self.state.track)
+                    self.show_image(img)
 
             await asyncio.sleep(0)
 
@@ -459,31 +518,17 @@ def fetch_state(spotify_client):
     shuffle = False
     repeat = False
     device_id = None
-    try:
-        resp = spotify_client.current_playing()
-        if resp and resp.get("item"):
-            current_track = resp["item"]
-            is_playing = resp.get("is_playing")
-            shuffle = resp.get("shuffle_state")
-            repeat = resp.get("repeat_state", "off") != "off" 
-            device_id = resp["device"]["id"]
-            print("Got current playing track: " + current_track.get("name"))
-    except Exception as e:
-        print("Failed to get current playing track:", e)
+    resp = spotify_client.current_playing()
+    if resp and resp.get("item"):
+        current_track = resp["item"]
+        is_playing = resp.get("is_playing")
+        shuffle = resp.get("shuffle_state")
+        repeat = resp.get("repeat_state", "off") != "off"
+        device_id = resp["device"]["id"]
+        print("Got current playing track: " + current_track.get("name"))
+        return device_id, current_track, is_playing, shuffle, repeat
 
-    if not current_track:
-        try:
-            resp = spotify_client.recently_played()
-            if resp and resp.get("items"):
-                current_track = resp["items"][0]["track"]
-                print("Got recently playing track: " + current_track.get("name"))
-        except Exception as e:
-            print("Failed to get recently played track:", e)
-
-    if not current_track:
-        return None
-
-    return device_id, current_track, is_playing, shuffle, repeat
+    return None
 
 def get_album_cover(track):
     """Fetches and resizes the album cover image for the given track."""

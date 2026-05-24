@@ -40,3 +40,9 @@ class BaseApp:
 
     def set_backlight(self, value):
         self.presto.set_backlight(max(0.1, min(1.0, value)))
+
+    def turn_screen_off(self):
+        self.presto.set_backlight(0.0)
+
+    def turn_screen_on(self, brightness):
+        self.presto.set_backlight(max(0.1, min(1.0, brightness)))

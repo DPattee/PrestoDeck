@@ -76,29 +76,6 @@ class SpotifyWebApiClient:
             skip_device_id=True,
         )
 
-class Device:
-    def __init__(
-        self,
-        id,
-        is_active,
-        is_private_session,
-        is_restricted,
-        name,
-        type,
-        volume_percent,
-        **kwargs
-    ):
-        self.id = id
-        self.is_active = is_active
-        self.is_private_session = is_private_session
-        self.is_restricted = is_restricted
-        self.name = name
-        self.type = type
-        self.volume_percent = volume_percent
-
-    def __repr__(self):
-        return 'Device(name={}, type={}, id={})'.format(self.name, self.type, self.id)
-
 class Session:
     def __init__(self, credentials):
         self.credentials = credentials

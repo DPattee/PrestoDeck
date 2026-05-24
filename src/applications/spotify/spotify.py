@@ -12,7 +12,7 @@ from applications.spotify.spotify_client import Session, SpotifyWebApiClient
 from base import BaseApp
 import secrets
 
-DEBUG = False
+DEBUG = True
 
 def debug_print(*args):
     if DEBUG:
@@ -405,6 +405,7 @@ class Spotify(BaseApp):
     ASLEEP_POLL_INTERVAL_SECONDS = 60
     WAITING_SLEEP_SECONDS = 300
     CONTROLS_TIMEOUT_SECONDS = 30
+    GC_INTERVAL_SECONDS = 10
     MAX_KNOWN_DEVICES = 10
 
     def __init__(self):
@@ -444,12 +445,13 @@ class Spotify(BaseApp):
         if "toggle_leds" in runtime_settings:
             self.state.toggle_leds = runtime_settings["toggle_leds"]
         if "backlight" in runtime_settings:
-            self.state.backlight = max(0.1, min(1.0, runtime_settings["backlight"]))
+            self.state.backlight = runtime_settings["backlight"]
         saved_device_id = self._load_saved_device_id()
         saved_device_name = self._load_saved_device_name()
         self.has_saved_device = bool(saved_device_id and saved_device_name)
         self.set_device_name(saved_device_name or self.state.device_name)
         self.known_devices = self._load_known_devices()
+        self.known_devices_dirty = False
         if self.has_saved_device:
             self._remember_device({
                 "id": saved_device_id,
@@ -458,6 +460,7 @@ class Spotify(BaseApp):
             self.save_runtime_settings()
         self.waiting_since = None
         self.controls_visible_since = None
+        self.last_gc = time.time()
         self.set_backlight(self.state.backlight)
         self.toggle_leds(self.state.toggle_leds)
         self.settings = SettingsPanel(self)
@@ -492,15 +495,9 @@ class Spotify(BaseApp):
         settings = self.load_runtime_settings()
         return settings.get("device_id")
 
-    def _save_device_id(self, device_id):
-        self.save_runtime_settings()
-
     def _load_saved_device_name(self):
         settings = self.load_runtime_settings()
         return settings.get("device_name")
-
-    def _save_device_name(self, device_name):
-        self.save_runtime_settings()
 
     def _make_device_label(self, name, available=True, max_len=22):
         name = ''.join(i if ord(i) < 128 else ' ' for i in (name or "Device"))
@@ -518,9 +515,42 @@ class Spotify(BaseApp):
         try:
             with open("spotify_settings.json", "r") as f:
                 settings = json.loads(f.read())
-                return settings if isinstance(settings, dict) else {}
         except (OSError, ValueError):
             return {}
+
+        if not isinstance(settings, dict):
+            return {}
+
+        return self._validate_runtime_settings(settings)
+
+    def _validate_runtime_settings(self, settings):
+        validated = {}
+
+        toggle_leds = settings.get("toggle_leds")
+        if isinstance(toggle_leds, bool):
+            validated["toggle_leds"] = toggle_leds
+        elif "toggle_leds" in settings:
+            debug_print("Ignoring invalid toggle_leds setting")
+
+        backlight = settings.get("backlight")
+        if isinstance(backlight, (int, float)):
+            validated["backlight"] = max(0.1, min(1.0, backlight))
+        elif "backlight" in settings:
+            debug_print("Ignoring invalid backlight setting")
+
+        device_id = settings.get("device_id")
+        if isinstance(device_id, str) and device_id:
+            validated["device_id"] = device_id
+        elif "device_id" in settings:
+            debug_print("Ignoring invalid device_id setting")
+
+        device_name = settings.get("device_name")
+        if isinstance(device_name, str) and device_name:
+            validated["device_name"] = device_name
+        elif "device_name" in settings:
+            debug_print("Ignoring invalid device_name setting")
+
+        return validated
 
     def save_runtime_settings(self):
         settings = {
@@ -556,10 +586,14 @@ class Spotify(BaseApp):
             return []
 
     def _save_known_devices(self):
+        if not self.known_devices_dirty:
+            return
+
         try:
             with open("spotify_devices.json", "w") as f:
                 self._trim_known_devices()
                 f.write(json.dumps(self.known_devices))
+                self.known_devices_dirty = False
         except OSError as e:
             debug_print("Failed to save known devices:", e)
 
@@ -592,18 +626,22 @@ class Spotify(BaseApp):
         }
         for i, known in enumerate(self.known_devices):
             if known.get("id") == device_id:
+                if known == saved and not promote:
+                    return
                 del self.known_devices[i]
                 if promote:
                     self.known_devices.insert(0, saved)
                 else:
                     self.known_devices.insert(i, saved)
                 self._trim_known_devices()
+                self.known_devices_dirty = True
                 return
         if promote:
             self.known_devices.insert(0, saved)
         else:
             self.known_devices.append(saved)
         self._trim_known_devices()
+        self.known_devices_dirty = True
 
     def _merge_devices(self, live_devices):
         live_ids = {}
@@ -675,7 +713,7 @@ class Spotify(BaseApp):
                 device_name = device.get("name", "Device")
                 if device_name != self.state.device_name:
                     self.set_device_name(device_name)
-                    self._save_device_name(self.state.device_name)
+                    self.save_runtime_settings()
                 return
         if device_id and not self.state.device_name:
             self.set_device_name("Device")
@@ -684,14 +722,16 @@ class Spotify(BaseApp):
         if not device_id:
             return
         if device_id == self.spotify_client.session.device_id:
-            self.set_device_name(device_name or self.state.device_name)
+            current_name = self.state.device_name
+            self.set_device_name(device_name or current_name)
             self.has_saved_device = True
-            self._save_device_name(self.state.device_name)
             self._remember_device({
                 "id": device_id,
                 "name": self.state.device_name,
             }, promote=True)
             self._save_known_devices()
+            if self.state.device_name != current_name:
+                self.save_runtime_settings()
             return
 
         try:
@@ -706,8 +746,7 @@ class Spotify(BaseApp):
             "id": device_id,
             "name": self.state.device_name,
         }, promote=True)
-        self._save_device_id(device_id)
-        self._save_device_name(self.state.device_name)
+        self.save_runtime_settings()
         self._save_known_devices()
         self.state.latest_fetch = None
 
@@ -790,6 +829,7 @@ class Spotify(BaseApp):
                 self._wake_screen()
                 while self.touch.state:
                     self.touch.poll()
+                    await asyncio.sleep_ms(1)
                 await asyncio.sleep_ms(1)
                 continue
 
@@ -803,6 +843,7 @@ class Spotify(BaseApp):
                     self.touch.poll()
                     if self.settings.handle_drag(self.touch, self.state):
                         self.settings.redraw_slider(self.state)
+                    await asyncio.sleep_ms(1)
                 self.settings.handle_release()
                 await asyncio.sleep_ms(1)
                 continue
@@ -817,11 +858,14 @@ class Spotify(BaseApp):
                             self.controls_visible_since = time.time()
                     except Exception as e:
                         debug_print(f"Failed to execute on_press: {e}")
+                        if DEBUG:
+                            raise
                     break
 
             # Wait here until the user stops touching the screen
             while self.touch.state:
                 self.touch.poll()
+                await asyncio.sleep_ms(1)
 
             await asyncio.sleep_ms(1)
 
@@ -935,7 +979,7 @@ class Spotify(BaseApp):
             self.display.set_pen(self.colors.WHITE)
             self.display.text(track_name, 18, self.height - 140, scale=1.1)
 
-            artists = ", ".join([artist.get("name") for artist in self.state.track.get("artists")])
+            artists = ", ".join([artist.get("name") for artist in self.state.track.get("artists") or []])
             # strip non-ascii characters
             artists = ''.join(i if ord(i) < 128 else ' ' for i in artists)
             if len(artists) > 35:
@@ -962,6 +1006,11 @@ class Spotify(BaseApp):
             self.write_track()
 
         self.presto.update()
+
+    def _maybe_collect_garbage(self):
+        if time.time() - self.last_gc >= self.GC_INTERVAL_SECONDS:
+            gc.collect()
+            self.last_gc = time.time()
 
     async def display_loop(self):
         """Periodically updates the display with the latest track info and controls."""
@@ -1013,7 +1062,7 @@ class Spotify(BaseApp):
             if prev_state != current_state:
                 self.draw_overlay()
                 prev_state = current_state
-            gc.collect()
+            self._maybe_collect_garbage()
             await asyncio.sleep_ms(200)
 
 def fetch_state(spotify_client):
@@ -1030,7 +1079,8 @@ def fetch_state(spotify_client):
         is_playing = resp.get("is_playing")
         shuffle = resp.get("shuffle_state")
         repeat = resp.get("repeat_state", "off") != "off"
-        device_id = resp["device"]["id"]
+        device = resp.get("device") or {}
+        device_id = device.get("id")
         debug_print("Got current playing track: " + current_track.get("name"))
         return device_id, current_track, is_playing, shuffle, repeat
 

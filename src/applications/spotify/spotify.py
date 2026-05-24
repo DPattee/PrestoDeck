@@ -20,6 +20,9 @@ def debug_print(*args):
 
 class State:
     """Tracks the current state of the Spotify app including playback and UI controls."""
+    WAITING_INDEX = 8
+    TRACK_ID_INDEX = 11
+
     def __init__(self):
         self.toggle_leds = True
         self.backlight = 1.0
@@ -34,45 +37,28 @@ class State:
         self.show_device_picker = False
         self.devices_loading = False
         self.device_name = "Device"
+        self.device_label = "Device"
         self.devices = []
         self.exit = False
 
         self.latest_fetch = None
-    
-    def copy(self):
-        state = State()
-        state.toggle_leds = self.toggle_leds
-        state.backlight = round(self.backlight, 2)
-        state.is_playing = self.is_playing
-        state.repeat = self.repeat
-        state.shuffle = self.shuffle
-        state.show_controls = self.show_controls
-        state.show_settings = self.show_settings
-        state.show_device_picker = self.show_device_picker
-        state.device_name = self.device_name
-        state.waiting = self.waiting
-        state.screen_asleep = self.screen_asleep
-        state.exit = self.exit
-        state.track = {'id': self.track['id']} if self.track else None # only care about track id
-        return state
-    
-    def __eq__(self, other):
-        if not isinstance(other, State) or other is None:
-            return False
+
+    def snapshot(self):
+        track_id = (self.track or {}).get('id')
         return (
-            self.toggle_leds == other.toggle_leds and
-            round(self.backlight, 2) == round(other.backlight, 2) and
-            self.is_playing == other.is_playing and
-            self.repeat == other.repeat and
-            self.shuffle == other.shuffle and
-            self.show_controls == other.show_controls and
-            self.show_settings == other.show_settings and
-            self.show_device_picker == other.show_device_picker and
-            self.device_name == other.device_name and
-            self.waiting == other.waiting and
-            self.screen_asleep == other.screen_asleep and
-            self.exit == other.exit and
-            (self.track or {}).get('id') == (other.track or {}).get('id')
+            self.toggle_leds,
+            round(self.backlight, 2),
+            self.is_playing,
+            self.repeat,
+            self.shuffle,
+            self.show_controls,
+            self.show_settings,
+            self.show_device_picker,
+            self.waiting,
+            self.screen_asleep,
+            self.exit,
+            track_id,
+            self.device_name,
         )
 
 class ControlButton():
@@ -95,7 +81,7 @@ class ControlButton():
     def is_pressed(self, state):
         """Checks if the button is enabled and currently pressed."""
         return self.enabled and self.button.is_pressed()
-    
+
     def draw(self, state):
         """Draws the button icon if enabled."""
         if self.enabled and self.icon:
@@ -133,9 +119,8 @@ class SettingsPanel:
         self.shuffle_icons = self._load_icons(("shuffle_on.png", "shuffle_off.png"))
         self.repeat_icons = self._load_icons(("repeat_on.png", "repeat_off.png"))
 
-        self.close_icon = pngdec.PNG(self.display)
-        self.close_icon.open_file("applications/spotify/icons/exit.png")
         self._slider_dragging = False
+        self._slider_dirty = False
 
     def _load_icons(self, names):
         icons = {}
@@ -248,8 +233,7 @@ class SettingsPanel:
         self.display.set_pen(self.colors.WHITE)
         self.display.rectangle(bx + 2, by + 2, bw - 4, bh - 4)
         self.display.set_pen(self.colors._BLACK)
-        label = self._truncate(state.device_name, 20)
-        self.display.text(label, bx + 10, by + bh // 2, scale=0.8)
+        self.display.text(state.device_label, bx + 10, by + bh // 2, scale=0.8)
 
     def _draw_device_picker(self, state):
         px, py, pw, ph = self.DEVICE_PICKER
@@ -284,11 +268,7 @@ class SettingsPanel:
                 self.display.rectangle(rx, ry, rw, rh)
                 self.display.set_pen(self.colors.WHITE)
 
-            name = device.get("name", "Unknown")
-            if not device.get("available", True):
-                name = name + " [Offline]"
-            name = self._truncate(name, 22)
-            self.display.text(name, rx + 8, ry + rh // 2, scale=0.8)
+            self.display.text(device.get("display_name", "Unknown"), rx + 8, ry + rh // 2, scale=0.8)
 
     def _picker_row_bounds(self, index):
         px, py, pw, _ = self.DEVICE_PICKER
@@ -315,6 +295,25 @@ class SettingsPanel:
         thumb_x = sx + int(normalized * (sw - 1))
         self.display.set_pen(self.colors.WHITE)
         self.display.circle(thumb_x, sy + sh // 2, 12)
+
+    def redraw_slider(self, state):
+        sx, sy, sw, sh = self.SLIDER
+        x = max(0, sx - 14)
+        y = sy
+        width = min(self.app.width - x, sw + 28)
+
+        self.display.set_layer(1)
+        self.display.set_pen(self.colors.GRAY)
+        self.display.rectangle(x, y, width, sh)
+        self._draw_slider(state.backlight)
+        self.app.presto.update()
+        self._slider_dirty = False
+
+    def consume_slider_dirty(self):
+        if not self._slider_dirty:
+            return False
+        self._slider_dirty = False
+        return True
 
     def handle_touch(self, touch, state):
         if not touch.state:
@@ -358,7 +357,7 @@ class SettingsPanel:
             return False
         if self._slider_dragging and touch.state:
             self._set_backlight_from_x(touch.x, state)
-            return True
+            return self._slider_dirty
         return False
 
     def handle_release(self):
@@ -393,6 +392,7 @@ class SettingsPanel:
         value = 0.1 + 0.9 * value
         if abs(value - state.backlight) > 0.01:
             self.app.set_backlight_setting(value)
+            self._slider_dirty = True
 
     @staticmethod
     def _in_bounds(x, y, bounds):
@@ -401,6 +401,8 @@ class SettingsPanel:
 
 class Spotify(BaseApp):
     """Main Spotify app managing playback controls, track display, and UI interactions."""
+    PLAYBACK_POLL_INTERVAL_SECONDS = 10
+    ASLEEP_POLL_INTERVAL_SECONDS = 60
     WAITING_SLEEP_SECONDS = 300
     CONTROLS_TIMEOUT_SECONDS = 30
     MAX_KNOWN_DEVICES = 10
@@ -446,21 +448,21 @@ class Spotify(BaseApp):
         saved_device_id = self._load_saved_device_id()
         saved_device_name = self._load_saved_device_name()
         self.has_saved_device = bool(saved_device_id and saved_device_name)
-        self.state.device_name = saved_device_name or self.state.device_name
+        self.set_device_name(saved_device_name or self.state.device_name)
         self.known_devices = self._load_known_devices()
         if self.has_saved_device:
             self._remember_device({
                 "id": saved_device_id,
                 "name": saved_device_name,
-                "type": "",
             })
+            self.save_runtime_settings()
         self.waiting_since = None
         self.controls_visible_since = None
         self.set_backlight(self.state.backlight)
         self.toggle_leds(self.state.toggle_leds)
         self.settings = SettingsPanel(self)
         self.setup_buttons()
-    
+
     def display_text(self, text, position, color=65535, scale=1, thickness=None):
         if thickness:
             self.display.set_thickness(2)
@@ -487,36 +489,34 @@ class Spotify(BaseApp):
         return client
 
     def _load_saved_device_id(self):
-        try:
-            with open("device_id.txt", "r") as f:
-                return f.read().strip()
-        except OSError:
-            return None
+        settings = self.load_runtime_settings()
+        return settings.get("device_id")
 
     def _save_device_id(self, device_id):
-        try:
-            with open("device_id.txt", "w") as f:
-                f.write(device_id)
-        except OSError as e:
-            debug_print("Failed to save device id:", e)
+        self.save_runtime_settings()
 
     def _load_saved_device_name(self):
-        try:
-            with open("device_name.txt", "r") as f:
-                return f.read().strip()
-        except OSError:
-            return None
+        settings = self.load_runtime_settings()
+        return settings.get("device_name")
 
     def _save_device_name(self, device_name):
-        try:
-            with open("device_name.txt", "w") as f:
-                f.write(device_name)
-        except OSError as e:
-            debug_print("Failed to save device name:", e)
+        self.save_runtime_settings()
+
+    def _make_device_label(self, name, available=True, max_len=22):
+        name = ''.join(i if ord(i) < 128 else ' ' for i in (name or "Device"))
+        if not available:
+            name = name + " [Offline]"
+        if len(name) > max_len:
+            return name[:max_len] + "..."
+        return name
+
+    def set_device_name(self, device_name):
+        self.state.device_name = device_name or "Device"
+        self.state.device_label = self._make_device_label(self.state.device_name, True, 20)
 
     def load_runtime_settings(self):
         try:
-            with open("runtime_settings.json", "r") as f:
+            with open("spotify_settings.json", "r") as f:
                 settings = json.loads(f.read())
                 return settings if isinstance(settings, dict) else {}
         except (OSError, ValueError):
@@ -527,8 +527,13 @@ class Spotify(BaseApp):
             "toggle_leds": self.state.toggle_leds,
             "backlight": round(self.state.backlight, 2),
         }
+        if hasattr(self, "spotify_client") and self.spotify_client.session.device_id:
+            settings["device_id"] = self.spotify_client.session.device_id
+        if getattr(self, "has_saved_device", False) and self.state.device_name:
+            settings["device_name"] = self.state.device_name
+
         try:
-            with open("runtime_settings.json", "w") as f:
+            with open("spotify_settings.json", "w") as f:
                 f.write(json.dumps(settings))
         except OSError as e:
             debug_print("Failed to save runtime settings:", e)
@@ -544,7 +549,7 @@ class Spotify(BaseApp):
 
     def _load_known_devices(self):
         try:
-            with open("known_devices.json", "r") as f:
+            with open("spotify_devices.json", "r") as f:
                 devices = json.loads(f.read())
                 return devices if isinstance(devices, list) else []
         except (OSError, ValueError):
@@ -552,7 +557,7 @@ class Spotify(BaseApp):
 
     def _save_known_devices(self):
         try:
-            with open("known_devices.json", "w") as f:
+            with open("spotify_devices.json", "w") as f:
                 self._trim_known_devices()
                 f.write(json.dumps(self.known_devices))
         except OSError as e:
@@ -584,7 +589,6 @@ class Spotify(BaseApp):
         saved = {
             "id": device_id,
             "name": device.get("name", "Device"),
-            "type": device.get("type", ""),
         }
         for i, known in enumerate(self.known_devices):
             if known.get("id") == device_id:
@@ -611,21 +615,23 @@ class Spotify(BaseApp):
                 continue
             live_ids[device_id] = True
             self._remember_device(device)
+            name = device.get("name", "Device")
             merged.append({
                 "id": device_id,
-                "name": device.get("name", "Device"),
-                "type": device.get("type", ""),
+                "name": name,
                 "available": True,
+                "display_name": self._make_device_label(name, True),
             })
 
         for device in self.known_devices:
             device_id = device.get("id")
             if device_id and device_id not in live_ids:
+                name = device.get("name", "Device")
                 merged.append({
                     "id": device_id,
-                    "name": device.get("name", "Device"),
-                    "type": device.get("type", ""),
+                    "name": name,
                     "available": False,
+                    "display_name": self._make_device_label(name, False),
                 })
 
         self._save_known_devices()
@@ -666,22 +672,24 @@ class Spotify(BaseApp):
         device_id = self.spotify_client.session.device_id
         for device in self.state.devices:
             if device.get("id") == device_id:
-                self.state.device_name = device.get("name", "Device")
-                self._save_device_name(self.state.device_name)
+                device_name = device.get("name", "Device")
+                if device_name != self.state.device_name:
+                    self.set_device_name(device_name)
+                    self._save_device_name(self.state.device_name)
                 return
         if device_id and not self.state.device_name:
-            self.state.device_name = "Device"
+            self.set_device_name("Device")
 
     def select_device(self, device_id, device_name):
         if not device_id:
             return
         if device_id == self.spotify_client.session.device_id:
-            self.state.device_name = device_name or self.state.device_name
+            self.set_device_name(device_name or self.state.device_name)
+            self.has_saved_device = True
             self._save_device_name(self.state.device_name)
             self._remember_device({
                 "id": device_id,
                 "name": self.state.device_name,
-                "type": "",
             }, promote=True)
             self._save_known_devices()
             return
@@ -692,18 +700,17 @@ class Spotify(BaseApp):
             debug_print("Failed to transfer playback:", e)
         self.spotify_client.session.device_id = device_id
         secrets.SPOTIFY_CREDENTIALS['device_id'] = device_id
-        self.state.device_name = device_name or "Device"
+        self.set_device_name(device_name or "Device")
         self.has_saved_device = True
         self._remember_device({
             "id": device_id,
             "name": self.state.device_name,
-            "type": "",
         }, promote=True)
         self._save_device_id(device_id)
         self._save_device_name(self.state.device_name)
         self._save_known_devices()
         self.state.latest_fetch = None
-        
+
     def setup_buttons(self):
         """Initializes control buttons and their behavior."""
         # --- Shared update functions ---
@@ -788,11 +795,14 @@ class Spotify(BaseApp):
 
             if self.state.show_settings:
                 if self.settings.handle_touch(self.touch, self.state):
-                    self.draw_overlay()
+                    if self.settings.consume_slider_dirty():
+                        self.settings.redraw_slider(self.state)
+                    else:
+                        self.draw_overlay()
                 while self.touch.state:
                     self.touch.poll()
                     if self.settings.handle_drag(self.touch, self.state):
-                        self.draw_overlay()
+                        self.settings.redraw_slider(self.state)
                 self.settings.handle_release()
                 await asyncio.sleep_ms(1)
                 continue
@@ -808,7 +818,7 @@ class Spotify(BaseApp):
                     except Exception as e:
                         debug_print(f"Failed to execute on_press: {e}")
                     break
-            
+
             # Wait here until the user stops touching the screen
             while self.touch.state:
                 self.touch.poll()
@@ -850,6 +860,7 @@ class Spotify(BaseApp):
     def _wake_screen(self):
         """Turns the screen back on after sleep and redraws the current view."""
         self.state.screen_asleep = False
+        self.state.latest_fetch = None
         self.turn_screen_on(self.state.backlight)
         if self.state.waiting:
             self.waiting_since = time.time()
@@ -906,7 +917,7 @@ class Spotify(BaseApp):
 
         except Exception as e:
             debug_print("Failed to load image:", e)
-        
+
     def write_track(self):
         """Writes the track name and artists on the screen."""
         if self.state.show_controls and self.state.track:
@@ -920,10 +931,10 @@ class Spotify(BaseApp):
             # shadow effect
             self.display.set_pen(self.colors._BLACK)
             self.display.text(track_name, 20, self.height - 137, scale=1.1)
-            
+
             self.display.set_pen(self.colors.WHITE)
             self.display.text(track_name, 18, self.height - 140, scale=1.1)
-            
+
             artists = ", ".join([artist.get("name") for artist in self.state.track.get("artists")])
             # strip non-ascii characters
             artists = ''.join(i if ord(i) < 128 else ' ' for i in artists)
@@ -933,7 +944,7 @@ class Spotify(BaseApp):
             # shadow effect
             self.display.set_pen(self.colors._BLACK)
             self.display.text(artists, 20, self.height - 108, scale=0.7)
-            
+
             self.display.set_pen(self.colors.WHITE)
             self.display.text(artists, 18, self.height - 111, scale=0.7)
 
@@ -946,6 +957,7 @@ class Spotify(BaseApp):
             self.settings.draw(self.state)
         elif self.state.show_controls:
             for button in self.buttons:
+                button.update(self.state, button)
                 button.draw(self.state)
             self.write_track()
 
@@ -953,11 +965,15 @@ class Spotify(BaseApp):
 
     async def display_loop(self):
         """Periodically updates the display with the latest track info and controls."""
-        INTERVAL = 10
         prev_state = None
 
         while not self.state.exit:
-            if not self.state.latest_fetch or time.time() - self.state.latest_fetch > INTERVAL:
+            poll_interval = (
+                self.ASLEEP_POLL_INTERVAL_SECONDS
+                if self.state.screen_asleep
+                else self.PLAYBACK_POLL_INTERVAL_SECONDS
+            )
+            if not self.state.latest_fetch or time.time() - self.state.latest_fetch > poll_interval:
                 self.state.latest_fetch = time.time()
                 try:
                     result = fetch_state(self.spotify_client)
@@ -978,10 +994,11 @@ class Spotify(BaseApp):
 
             await asyncio.sleep(0)
 
+            current_state = self.state.snapshot()
             layer0_changed = (
                 not prev_state
-                or prev_state.waiting != self.state.waiting
-                or (prev_state.track or {}).get('id') != (self.state.track or {}).get("id")
+                or prev_state[State.WAITING_INDEX] != current_state[State.WAITING_INDEX]
+                or prev_state[State.TRACK_ID_INDEX] != current_state[State.TRACK_ID_INDEX]
             )
             if layer0_changed:
                 if self.state.waiting:
@@ -993,9 +1010,9 @@ class Spotify(BaseApp):
             await asyncio.sleep(0)
 
             # update display if state changes
-            if prev_state != self.state:
+            if prev_state != current_state:
                 self.draw_overlay()
-                prev_state = self.state.copy()
+                prev_state = current_state
             gc.collect()
             await asyncio.sleep_ms(200)
 
@@ -1031,7 +1048,7 @@ def get_album_cover(track):
     if not img_url:
         debug_print("Album image has no URL.")
         return None
-    
+
     img = None
     resize_url = f"https://wsrv.nl/?url={img_url}&w=480&h=480"
     response = None
@@ -1046,7 +1063,7 @@ def get_album_cover(track):
     finally:
         if response:
             response.close()
-        
+
     return img
 
 def launch():

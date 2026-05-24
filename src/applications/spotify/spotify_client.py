@@ -1,10 +1,12 @@
 import sys
 
 import urequests as requests
+# These look unused, but keep them loaded for this MicroPython runtime.
+# Removing them has caused token refresh requests to fail on-device.
 import usocket as socket
 import ujson as json
 
-DEBUG = False
+DEBUG = True
 
 def debug_print(*args):
     if DEBUG:
@@ -34,19 +36,19 @@ class SpotifyWebApiClient:
         self.session.put(
             url='https://api.spotify.com/v1/me/player/pause',
         )
-    
+
     def toggle_shuffle(self, state):
         value = "true" if state else "false"
         self.session.put(
             url=f'https://api.spotify.com/v1/me/player/shuffle?state={value}',
         )
-    
+
     def toggle_repeat(self, state):
         value = "track" if state else 'off'
         self.session.put(
             url=f'https://api.spotify.com/v1/me/player/repeat?state={value}',
         )
-    
+
     def next(self):
         self.session.post(
             url='https://api.spotify.com/v1/me/player/next',
@@ -60,11 +62,6 @@ class SpotifyWebApiClient:
     def current_playing(self):
         return self.session.get(
             url='https://api.spotify.com/v1/me/player',
-        )
-    
-    def recently_played(self):
-        return self.session.get(
-            url='https://api.spotify.com/v1/me/player/recently-played?limit=1',
         )
 
     def devices(self):
@@ -134,7 +131,7 @@ class Session:
             )
 
         return self._execute_request(put_request)
-    
+
     def post(self, url, json=None, **kwargs):
         # Workaround for urequests not sending "Content-Length" on empty data
         if json is None:
@@ -169,7 +166,7 @@ class Session:
             response.close()
             return resp_json
         response.close()
-        
+
 
     @staticmethod
     def _check_status_code(response):

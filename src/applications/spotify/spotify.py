@@ -107,15 +107,15 @@ class ControlButton():
 
 class SettingsPanel:
     """Modal settings window with playback options and display controls."""
-    PANEL = (24, 24, 432, 432)
+    PANEL = (12, 12, 456, 456)
     SLIDER = (190, 356, 230, 40)
     DEVICE_BUTTON = (190, 92, 230, 40)
-    DEVICE_PICKER = (24, 24, 432, 432)
+    DEVICE_PICKER = (12, 12, 456, 456)
     PICKER_ROW_HEIGHT = 44
     LED_TOGGLE = (340, 148, 60, 60)
     SHUFFLE_TOGGLE = (340, 214, 60, 60)
     REPEAT_TOGGLE = (340, 280, 60, 60)
-    CLOSE = (400, 39, 40, 40)
+    CLOSE = (404, 18, 52, 40)
     TITLE_BAR_HEIGHT = 52
 
     def __init__(self, app):
@@ -172,9 +172,7 @@ class SettingsPanel:
         self.display.text("Backlight", px + 20, 376, scale=0.9)
         self._draw_slider(state.backlight)
 
-        cx, cy, cw, ch = self.CLOSE
-        close_w, close_h = self.close_icon.get_width(), self.close_icon.get_height()
-        self.close_icon.decode(cx + (cw - close_w) // 2, cy + (ch - close_h) // 2)
+        self._draw_close_button()
 
         if state.show_device_picker:
             self._draw_device_picker(state)
@@ -195,6 +193,48 @@ class SettingsPanel:
         self.display.set_thickness(2)
         self.display.text(title, px + 20, py + 25, scale=1.2)
 
+    def _draw_close_button(self):
+        cx, cy, cw, ch = self.CLOSE
+        x_padding = 16
+        y_padding = 10
+
+        self.display.set_pen(self.colors._BLACK)
+        self.display.rectangle(cx, cy, cw, ch)
+        self.display.set_pen(self.colors.DARK_GRAY)
+        self.display.rectangle(cx + 2, cy + 2, cw - 4, ch - 4)
+
+        self.display.set_pen(self.colors._BLACK)
+        self.display.line(
+            cx + x_padding,
+            cy + y_padding,
+            cx + cw - x_padding,
+            cy + ch - y_padding,
+            8,
+        )
+        self.display.line(
+            cx + cw - x_padding,
+            cy + y_padding,
+            cx + x_padding,
+            cy + ch - y_padding,
+            8,
+        )
+
+        self.display.set_pen(self.colors.WHITE)
+        self.display.line(
+            cx + x_padding,
+            cy + y_padding,
+            cx + cw - x_padding,
+            cy + ch - y_padding,
+            4,
+        )
+        self.display.line(
+            cx + cw - x_padding,
+            cy + y_padding,
+            cx + x_padding,
+            cy + ch - y_padding,
+            4,
+        )
+
     def _draw_device_button(self, state):
         bx, by, bw, bh = self.DEVICE_BUTTON
         self.display.set_pen(self.colors._BLACK)
@@ -212,6 +252,7 @@ class SettingsPanel:
         self.display.set_pen(self.colors.GRAY)
         self.display.rectangle(px, py, pw, ph)
         self._draw_title_bar("Select Device", self.DEVICE_PICKER)
+        self._draw_close_button()
 
         if state.devices_loading:
             self.display.text("Loading...", px + 20, py + 60, scale=0.9)
@@ -321,6 +362,10 @@ class SettingsPanel:
 
     def _handle_device_picker_touch(self, touch, state):
         px, py, pw, ph = self.DEVICE_PICKER
+        if self._in_bounds(touch.x, touch.y, self.CLOSE):
+            state.show_device_picker = False
+            return True
+
         if not self._in_bounds(touch.x, touch.y, self.DEVICE_PICKER):
             state.show_device_picker = False
             return True
@@ -351,6 +396,7 @@ class SettingsPanel:
 class Spotify(BaseApp):
     """Main Spotify app managing playback controls, track display, and UI interactions."""
     WAITING_SLEEP_SECONDS = 300
+    CONTROLS_TIMEOUT_SECONDS = 30
     MAX_KNOWN_DEVICES = 10
 
     def __init__(self):
@@ -403,6 +449,7 @@ class Spotify(BaseApp):
                 "type": "",
             })
         self.waiting_since = None
+        self.controls_visible_since = None
         self.set_backlight(self.state.backlight)
         self.toggle_leds(self.state.toggle_leds)
         self.settings = SettingsPanel(self)
@@ -622,6 +669,17 @@ class Spotify(BaseApp):
     def select_device(self, device_id, device_name):
         if not device_id:
             return
+        if device_id == self.spotify_client.session.device_id:
+            self.state.device_name = device_name or self.state.device_name
+            self._save_device_name(self.state.device_name)
+            self._remember_device({
+                "id": device_id,
+                "name": self.state.device_name,
+                "type": "",
+            }, promote=True)
+            self._save_known_devices()
+            return
+
         try:
             self.spotify_client.transfer_playback(device_id, play=False)
         except Exception as e:
@@ -666,6 +724,7 @@ class Spotify(BaseApp):
 
         def toggle_controls(self):
             self.state.show_controls = not self.state.show_controls
+            self.controls_visible_since = time.time() if self.state.show_controls else None
 
         def play_pause(self):
             if self.state.is_playing:
@@ -738,6 +797,8 @@ class Spotify(BaseApp):
                     print(f"{button.name} pressed")
                     try:
                         button.on_press(self)
+                        if self.state.show_controls:
+                            self.controls_visible_since = time.time()
                     except Exception as e:
                         print(f"Failed to execute on_press: {e}")
                     break
@@ -803,6 +864,24 @@ class Spotify(BaseApp):
                 self.turn_screen_on(self.state.backlight)
                 self.state.screen_asleep = False
             self.waiting_since = None
+
+    def _manage_controls_timeout(self):
+        """Hide controls after inactivity, pausing while modal windows are open."""
+        if not self.state.show_controls:
+            self.controls_visible_since = None
+            return
+
+        if self.state.show_settings or self.state.show_device_picker:
+            self.controls_visible_since = time.time()
+            return
+
+        if self.controls_visible_since is None:
+            self.controls_visible_since = time.time()
+            return
+
+        if time.time() - self.controls_visible_since >= self.CONTROLS_TIMEOUT_SECONDS:
+            self.state.show_controls = False
+            self.controls_visible_since = None
 
     def show_image(self, img, minimized=False):
         """Displays an album cover image on the screen."""
@@ -889,6 +968,7 @@ class Spotify(BaseApp):
                     print("Failed to fetch playback state:", e)
 
             self._manage_waiting_screen()
+            self._manage_controls_timeout()
 
             await asyncio.sleep(0)
 

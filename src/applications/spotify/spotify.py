@@ -107,15 +107,16 @@ class ControlButton():
 
 class SettingsPanel:
     """Modal settings window with playback options and display controls."""
-    PANEL = (60, 60, 360, 370)
-    SLIDER = (80, 370, 320, 40)
-    DEVICE_BUTTON = (80, 95, 260, 36)
-    DEVICE_PICKER = (50, 90, 380, 300)
+    PANEL = (24, 24, 432, 432)
+    SLIDER = (190, 356, 230, 40)
+    DEVICE_BUTTON = (190, 92, 230, 40)
+    DEVICE_PICKER = (24, 24, 432, 432)
     PICKER_ROW_HEIGHT = 44
-    LED_TOGGLE = (300, 160, 60, 60)
-    SHUFFLE_TOGGLE = (300, 220, 60, 60)
-    REPEAT_TOGGLE = (300, 280, 60, 60)
-    CLOSE = (370, 75, 40, 40)
+    LED_TOGGLE = (340, 148, 60, 60)
+    SHUFFLE_TOGGLE = (340, 214, 60, 60)
+    REPEAT_TOGGLE = (340, 280, 60, 60)
+    CLOSE = (400, 39, 40, 40)
+    TITLE_BAR_HEIGHT = 52
 
     def __init__(self, app):
         self.app = app
@@ -145,32 +146,30 @@ class SettingsPanel:
         self.display.set_pen(self.colors.GRAY)
         self.display.rectangle(px, py, pw, ph)
 
-        self.display.set_pen(self.colors.WHITE)
-        self.display.set_thickness(2)
-        self.display.text("Settings", px + 20, py + 20, scale=1.2)
+        self._draw_title_bar("Settings", self.PANEL)
 
-        self.display.text("Device", px + 20, py + 55, scale=0.9)
+        self.display.text("Device", px + 20, 112, scale=0.9)
         self._draw_device_button(state)
 
-        self.display.text("Ambient LEDs", px + 20, py + 115, scale=0.9)
+        self.display.text("Ambient LEDs", px + 20, 178, scale=0.9)
         self._draw_toggle_icon(
             self.led_icons["light_on.png" if state.toggle_leds else "light_off.png"],
             self.LED_TOGGLE,
         )
 
-        self.display.text("Shuffle", px + 20, py + 175, scale=0.9)
+        self.display.text("Shuffle", px + 20, 244, scale=0.9)
         self._draw_toggle_icon(
             self.shuffle_icons["shuffle_on.png" if state.shuffle else "shuffle_off.png"],
             self.SHUFFLE_TOGGLE,
         )
 
-        self.display.text("Repeat", px + 20, py + 235, scale=0.9)
+        self.display.text("Repeat", px + 20, 310, scale=0.9)
         self._draw_toggle_icon(
             self.repeat_icons["repeat_on.png" if state.repeat else "repeat_off.png"],
             self.REPEAT_TOGGLE,
         )
 
-        self.display.text("Backlight", px + 20, py + 295, scale=0.9)
+        self.display.text("Backlight", px + 20, 376, scale=0.9)
         self._draw_slider(state.backlight)
 
         cx, cy, cw, ch = self.CLOSE
@@ -186,6 +185,16 @@ class SettingsPanel:
             return text[:max_len] + "..."
         return text
 
+    def _draw_title_bar(self, title, bounds):
+        px, py, pw, _ = bounds
+        self.display.set_pen(self.colors.DARK_GRAY)
+        self.display.rectangle(px, py, pw, self.TITLE_BAR_HEIGHT)
+        self.display.set_pen(self.colors._BLACK)
+        self.display.rectangle(px, py + self.TITLE_BAR_HEIGHT - 2, pw, 2)
+        self.display.set_pen(self.colors.WHITE)
+        self.display.set_thickness(2)
+        self.display.text(title, px + 20, py + 25, scale=1.2)
+
     def _draw_device_button(self, state):
         bx, by, bw, bh = self.DEVICE_BUTTON
         self.display.set_pen(self.colors._BLACK)
@@ -194,16 +203,15 @@ class SettingsPanel:
         self.display.rectangle(bx + 2, by + 2, bw - 4, bh - 4)
         self.display.set_pen(self.colors._BLACK)
         label = self._truncate(state.device_name, 20)
-        self.display.text(label, bx + 10, by + 10, scale=0.8)
+        self.display.text(label, bx + 10, by + bh // 2, scale=0.8)
 
     def _draw_device_picker(self, state):
         px, py, pw, ph = self.DEVICE_PICKER
         self.display.set_pen(self.colors._BLACK)
-        self.display.rectangle(0, 0, self.app.width, self.app.height)
+        self.display.rectangle(px - 2, py - 2, pw + 4, ph + 4)
         self.display.set_pen(self.colors.GRAY)
         self.display.rectangle(px, py, pw, ph)
-        self.display.set_pen(self.colors.WHITE)
-        self.display.text("Select Device", px + 20, py + 15, scale=1.0)
+        self._draw_title_bar("Select Device", self.DEVICE_PICKER)
 
         if state.devices_loading:
             self.display.text("Loading...", px + 20, py + 60, scale=0.9)
@@ -215,7 +223,7 @@ class SettingsPanel:
             return
 
         current_id = self.app.spotify_client.session.device_id
-        max_rows = min(len(state.devices), 5)
+        max_rows = min(len(state.devices), self._max_picker_rows())
         for i in range(max_rows):
             device = state.devices[i]
             row = self._picker_row_bounds(i)
@@ -233,14 +241,16 @@ class SettingsPanel:
             if not device.get("available", True):
                 name = name + " [Offline]"
             name = self._truncate(name, 22)
-            device_type = self._truncate(device.get("type", ""), 12)
-            self.display.text(name, rx + 8, ry + 6, scale=0.8)
-            self.display.text(device_type, rx + 8, ry + 24, scale=0.6)
+            self.display.text(name, rx + 8, ry + rh // 2, scale=0.8)
 
     def _picker_row_bounds(self, index):
         px, py, pw, _ = self.DEVICE_PICKER
-        row_y = py + 50 + index * self.PICKER_ROW_HEIGHT
+        row_y = py + self.TITLE_BAR_HEIGHT + 10 + index * self.PICKER_ROW_HEIGHT
         return (px + 10, row_y, pw - 20, self.PICKER_ROW_HEIGHT - 4)
+
+    def _max_picker_rows(self):
+        _, _, _, ph = self.DEVICE_PICKER
+        return (ph - self.TITLE_BAR_HEIGHT - 20) // self.PICKER_ROW_HEIGHT
 
     def _draw_toggle_icon(self, icon, bounds):
         lx, ly, lw, lh = bounds
@@ -318,7 +328,7 @@ class SettingsPanel:
         if state.devices_loading or not state.devices:
             return True
 
-        for i, device in enumerate(state.devices[:5]):
+        for i, device in enumerate(state.devices[:self._max_picker_rows()]):
             if self._in_bounds(touch.x, touch.y, self._picker_row_bounds(i)):
                 self.app.select_device(device.get("id"), device.get("name", "Device"))
                 state.show_device_picker = False
@@ -341,6 +351,7 @@ class SettingsPanel:
 class Spotify(BaseApp):
     """Main Spotify app managing playback controls, track display, and UI interactions."""
     WAITING_SLEEP_SECONDS = 300
+    MAX_KNOWN_DEVICES = 10
 
     def __init__(self):
         super().__init__(ambient_light=True, full_res=True, layers=2)
@@ -489,11 +500,30 @@ class Spotify(BaseApp):
     def _save_known_devices(self):
         try:
             with open("known_devices.json", "w") as f:
+                self._trim_known_devices()
                 f.write(json.dumps(self.known_devices))
         except OSError as e:
             print("Failed to save known devices:", e)
 
-    def _remember_device(self, device):
+    def _trim_known_devices(self):
+        device_id = self.spotify_client.session.device_id
+        selected = []
+        others = []
+        seen = {}
+
+        for device in self.known_devices:
+            known_id = device.get("id")
+            if not known_id or known_id in seen:
+                continue
+            seen[known_id] = True
+            if known_id == device_id:
+                selected.append(device)
+            else:
+                others.append(device)
+
+        self.known_devices = (selected + others)[:self.MAX_KNOWN_DEVICES]
+
+    def _remember_device(self, device, promote=False):
         device_id = device.get("id")
         if not device_id:
             return
@@ -505,9 +535,18 @@ class Spotify(BaseApp):
         }
         for i, known in enumerate(self.known_devices):
             if known.get("id") == device_id:
-                self.known_devices[i] = saved
+                del self.known_devices[i]
+                if promote:
+                    self.known_devices.insert(0, saved)
+                else:
+                    self.known_devices.insert(i, saved)
+                self._trim_known_devices()
                 return
-        self.known_devices.append(saved)
+        if promote:
+            self.known_devices.insert(0, saved)
+        else:
+            self.known_devices.append(saved)
+        self._trim_known_devices()
 
     def _merge_devices(self, live_devices):
         live_ids = {}
@@ -537,7 +576,23 @@ class Spotify(BaseApp):
                 })
 
         self._save_known_devices()
-        return merged
+        return self._prioritize_devices(merged)
+
+    def _prioritize_devices(self, devices):
+        selected_id = self.spotify_client.session.device_id
+        selected = []
+        online = []
+        offline = []
+
+        for device in devices:
+            if device.get("id") == selected_id:
+                selected.append(device)
+            elif device.get("available", True):
+                online.append(device)
+            else:
+                offline.append(device)
+
+        return selected + online + offline
 
     def refresh_devices(self):
         self.state.devices_loading = True
@@ -575,8 +630,14 @@ class Spotify(BaseApp):
         secrets.SPOTIFY_CREDENTIALS['device_id'] = device_id
         self.state.device_name = device_name or "Device"
         self.has_saved_device = True
+        self._remember_device({
+            "id": device_id,
+            "name": self.state.device_name,
+            "type": "",
+        }, promote=True)
         self._save_device_id(device_id)
         self._save_device_name(self.state.device_name)
+        self._save_known_devices()
         self.state.latest_fetch = None
         
     def setup_buttons(self):
@@ -585,11 +646,14 @@ class Spotify(BaseApp):
         def update_show_controls(state, button):
             button.enabled = state.show_controls and not state.show_settings
 
+        def update_playback_controls(state, button):
+            button.enabled = state.show_controls and not state.show_settings and not state.waiting
+
         def update_always_enabled(state, button):
             button.enabled = not state.show_settings
 
         def update_play_pause(state, button):
-            button.enabled = state.show_controls and not state.show_settings
+            button.enabled = state.show_controls and not state.show_settings and not state.waiting
             button.icon = "pause.png" if state.is_playing else "play.png"
 
         def update_settings(state, button):
@@ -625,8 +689,8 @@ class Spotify(BaseApp):
         # --- Button configurations ---
         buttons_config = [
             ("Exit", ["exit.png"], (0, 0, 80, 80), exit_app, update_show_controls),
-            ("Next", ["next.png"], (self.center_x + 120, self.height - 100, 80, 100), next_track, update_show_controls),
-            ("Previous", ["previous.png"], (self.center_x - 200, self.height - 100, 80, 100), previous_track, update_show_controls),
+            ("Next", ["next.png"], (self.center_x + 120, self.height - 100, 80, 100), next_track, update_playback_controls),
+            ("Previous", ["previous.png"], (self.center_x - 200, self.height - 100, 80, 100), previous_track, update_playback_controls),
             ("Play", ["play.png", "pause.png"], (self.center_x - 40, self.height - 100, 80, 100), play_pause, update_play_pause),
             ("Settings", ["settings.png"], (self.width - 100, 0, 100, 80), open_settings, update_settings),
             ("Toggle Controls", None, (0, 0, self.width, self.height), toggle_controls, update_always_enabled),

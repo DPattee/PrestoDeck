@@ -37,3 +37,6 @@ class BaseApp:
             self.presto.auto_ambient_leds(False)
             for i in range(7):
                 self.presto.set_led_rgb(i, 0, 0, 0)
+
+    def set_backlight(self, value):
+        self.presto.set_backlight(max(0.1, min(1.0, value)))

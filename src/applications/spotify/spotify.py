@@ -15,11 +15,13 @@ class State:
     """Tracks the current state of the Spotify app including playback and UI controls."""
     def __init__(self):
         self.toggle_leds = True
+        self.backlight = 1.0
         self.is_playing = False
         self.repeat = False
         self.shuffle = False
         self.track = None
         self.show_controls = False
+        self.show_settings = False
         self.exit = False
 
         self.latest_fetch = None
@@ -27,10 +29,12 @@ class State:
     def copy(self):
         state = State()
         state.toggle_leds = self.toggle_leds
+        state.backlight = round(self.backlight, 2)
         state.is_playing = self.is_playing
         state.repeat = self.repeat
         state.shuffle = self.shuffle
         state.show_controls = self.show_controls
+        state.show_settings = self.show_settings
         state.exit = self.exit
         state.track = {'id': self.track['id']} if self.track else None # only care about track id
         return state
@@ -40,10 +44,12 @@ class State:
             return False
         return (
             self.toggle_leds == other.toggle_leds and
+            round(self.backlight, 2) == round(other.backlight, 2) and
             self.is_playing == other.is_playing and
             self.repeat == other.repeat and
             self.shuffle == other.shuffle and
             self.show_controls == other.show_controls and
+            self.show_settings == other.show_settings and
             self.exit == other.exit and
             (self.track or {}).get('id') == (other.track or {}).get('id')
         )
@@ -84,6 +90,107 @@ class ControlButton():
 
         png.decode(x+x_offset, y+y_offset)
 
+class SettingsPanel:
+    """Modal settings window with ambient LED toggle and backlight slider."""
+    PANEL = (60, 90, 360, 300)
+    SLIDER = (80, 280, 320, 40)
+    LED_TOGGLE = (300, 175, 80, 80)
+    CLOSE = (370, 105, 40, 40)
+
+    def __init__(self, app):
+        self.app = app
+        self.display = app.display
+        self.colors = app.colors
+
+        self.led_icons = {}
+        for icon in ("light_on.png", "light_off.png"):
+            png = pngdec.PNG(self.display)
+            png.open_file("applications/spotify/icons/" + icon)
+            self.led_icons[icon] = png
+
+        self.close_icon = pngdec.PNG(self.display)
+        self.close_icon.open_file("applications/spotify/icons/exit.png")
+        self._slider_dragging = False
+
+    def draw(self, state):
+        px, py, pw, ph = self.PANEL
+        self.display.set_pen(self.colors._BLACK)
+        self.display.rectangle(px - 2, py - 2, pw + 4, ph + 4)
+        self.display.set_pen(self.colors.GRAY)
+        self.display.rectangle(px, py, pw, ph)
+
+        self.display.set_pen(self.colors.WHITE)
+        self.display.set_thickness(2)
+        self.display.text("Settings", px + 20, py + 20, scale=1.2)
+
+        self.display.text("Ambient LEDs", px + 20, py + 100, scale=0.9)
+        self.display.text("Backlight", px + 20, py + 200, scale=0.9)
+
+        led_icon = self.led_icons["light_on.png" if state.toggle_leds else "light_off.png"]
+        lx, ly, lw, lh = self.LED_TOGGLE
+        icon_w, icon_h = led_icon.get_width(), led_icon.get_height()
+        led_icon.decode(lx + (lw - icon_w) // 2, ly + (lh - icon_h) // 2)
+
+        self._draw_slider(state.backlight)
+
+        cx, cy, cw, ch = self.CLOSE
+        close_w, close_h = self.close_icon.get_width(), self.close_icon.get_height()
+        self.close_icon.decode(cx + (cw - close_w) // 2, cy + (ch - close_h) // 2)
+
+    def _draw_slider(self, value):
+        sx, sy, sw, sh = self.SLIDER
+        self.display.set_pen(self.colors._BLACK)
+        self.display.rectangle(sx, sy + sh // 2 - 4, sw, 8)
+        self.display.set_pen(self.colors.WHITE)
+        self.display.rectangle(sx + 2, sy + sh // 2 - 2, sw - 4, 4)
+
+        normalized = (value - 0.1) / 0.9
+        thumb_x = sx + int(normalized * (sw - 1))
+        self.display.set_pen(self.colors.WHITE)
+        self.display.circle(thumb_x, sy + sh // 2, 12)
+
+    def handle_touch(self, touch, state):
+        if not touch.state:
+            return False
+
+        if self._in_bounds(touch.x, touch.y, self.CLOSE):
+            state.show_settings = False
+            return True
+
+        if self._in_bounds(touch.x, touch.y, self.LED_TOGGLE):
+            state.toggle_leds = not state.toggle_leds
+            self.app.toggle_leds(state.toggle_leds)
+            return True
+
+        if self._in_bounds(touch.x, touch.y, self.SLIDER):
+            self._slider_dragging = True
+            self._set_backlight_from_x(touch.x, state)
+            return True
+
+        return False
+
+    def handle_drag(self, touch, state):
+        if self._slider_dragging and touch.state:
+            self._set_backlight_from_x(touch.x, state)
+            return True
+        return False
+
+    def handle_release(self):
+        self._slider_dragging = False
+
+    def _set_backlight_from_x(self, x, state):
+        sx, _, sw, _ = self.SLIDER
+        value = max(0.0, min(1.0, (x - sx) / sw))
+        value = 0.1 + 0.9 * value
+        if abs(value - state.backlight) > 0.01:
+            state.backlight = value
+            self.app.set_backlight(value)
+
+    @staticmethod
+    def _in_bounds(x, y, bounds):
+        bx, by, bw, bh = bounds
+        return bx <= x <= bx + bw and by <= y <= by + bh
+
 class Spotify(BaseApp):
     """Main Spotify app managing playback controls, track display, and UI interactions."""
     def __init__(self):
@@ -116,6 +223,8 @@ class Spotify(BaseApp):
         self.j = jpegdec.JPEG(self.display)
 
         self.state = State()
+        self.set_backlight(self.state.backlight)
+        self.settings = SettingsPanel(self)
         self.setup_buttons()
     
     def display_text(self, text, position, color=65535, scale=1, thickness=None):
@@ -142,26 +251,26 @@ class Spotify(BaseApp):
         """Initializes control buttons and their behavior."""
         # --- Shared update functions ---
         def update_show_controls(state, button):
-            button.enabled = state.show_controls
+            button.enabled = state.show_controls and not state.show_settings
 
         def update_always_enabled(state, button):
-            button.enabled = True
+            button.enabled = not state.show_settings
 
         def update_play_pause(state, button):
-            button.enabled = state.show_controls
+            button.enabled = state.show_controls and not state.show_settings
             button.icon = "pause.png" if state.is_playing else "play.png"
 
         def update_shuffle(state, button):
-            button.enabled = state.show_controls
+            button.enabled = state.show_controls and not state.show_settings
             button.icon = "shuffle_on.png" if state.shuffle else "shuffle_off.png"
 
         def update_repeat(state, button):
-            button.enabled = state.show_controls
+            button.enabled = state.show_controls and not state.show_settings
             button.icon = "repeat_on.png" if state.repeat else "repeat_off.png"
 
-        def update_light(state, button):
-            button.enabled = state.show_controls
-            button.icon = "light_on.png" if state.toggle_leds else "light_off.png"
+        def update_settings(state, button):
+            button.enabled = state.show_controls and not state.show_settings
+            button.icon = "settings.png"
 
         # --- On-press handlers ---
         def exit_app(self):
@@ -193,9 +302,9 @@ class Spotify(BaseApp):
             self.spotify_client.toggle_repeat(not self.state.repeat)
             self.state.repeat = not self.state.repeat
 
-        def toggle_lights(self):
-            self.toggle_leds(not self.state.toggle_leds)
-            self.state.toggle_leds = not self.state.toggle_leds
+        def open_settings(self):
+            self.state.show_settings = True
+            self.draw_overlay()
 
         # --- Button configurations ---
         buttons_config = [
@@ -205,7 +314,7 @@ class Spotify(BaseApp):
             ("Play", ["play.png", "pause.png"], (self.center_x - 50, self.height - 100, 80, 100), play_pause, update_play_pause),
             ("Toggle Shuffle", ["shuffle_on.png", "shuffle_off.png"], (self.center_x - 230, self.height - 100, 80, 100), toggle_shuffle, update_shuffle),
             ("Toggle Repeat", ["repeat_on.png", "repeat_off.png"], (self.center_x + 150, self.height - 100, 80, 100), toggle_repeat, update_repeat),
-            ("Toggle Light", ["light_on.png", "light_off.png"], (self.width - 100, 0, 100, 80), toggle_lights, update_light),
+            ("Settings", ["settings.png"], (self.width - 100, 0, 100, 80), open_settings, update_settings),
             ("Toggle Controls", None, (0, 0, self.width, self.height), toggle_controls, update_always_enabled),
         ]
 
@@ -226,6 +335,17 @@ class Spotify(BaseApp):
         """Handles touch input events and button presses."""
         while not self.state.exit:
             self.touch.poll()
+
+            if self.state.show_settings:
+                if self.settings.handle_touch(self.touch, self.state):
+                    self.draw_overlay()
+                while self.touch.state:
+                    self.touch.poll()
+                    if self.settings.handle_drag(self.touch, self.state):
+                        self.draw_overlay()
+                self.settings.handle_release()
+                await asyncio.sleep_ms(1)
+                continue
 
             for button in self.buttons:
                 button.update(self.state, button)
@@ -287,6 +407,20 @@ class Spotify(BaseApp):
             self.display.set_pen(self.colors.WHITE)
             self.display.text(artists, 18, self.height - 111, scale=0.7)
 
+    def draw_overlay(self):
+        """Draws the control overlay or settings panel on layer 1."""
+        self.display.set_layer(1)
+        self.clear(1)
+
+        if self.state.show_settings:
+            self.settings.draw(self.state)
+        elif self.state.show_controls:
+            for button in self.buttons:
+                button.draw(self.state)
+            self.write_track()
+
+        self.presto.update()
+
     async def display_loop(self):
         """Periodically updates the display with the latest track info and controls."""
         INTERVAL = 10
@@ -304,7 +438,7 @@ class Spotify(BaseApp):
 
             await asyncio.sleep(0)
 
-            if not prev_state or prev_state.track.get('id') != self.state.track.get("id"):
+            if not prev_state or (prev_state.track or {}).get('id') != (self.state.track or {}).get("id"):
                 img = get_album_cover(self.state.track)
                 self.show_image(img)
 
@@ -312,12 +446,7 @@ class Spotify(BaseApp):
 
             # update display if state changes
             if prev_state != self.state:
-                self.clear(1)
-                for button in self.buttons:
-                    button.draw(self.state)
-                self.write_track()
-
-                self.presto.update()
+                self.draw_overlay()
                 prev_state = self.state.copy()
             gc.collect()
             await asyncio.sleep_ms(200)
